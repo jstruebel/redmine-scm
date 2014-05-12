@@ -1,0 +1,6 @@
+#!/bin/sh
+# Script to update the redmine repository passed from the command line
+
+/usr/bin/env PROJECT_IDENTIFIER=$1 RAILS_ENV=production \
+/var/www/redmine/script/rails runner \
+"Project.find_by_identifier(ENV['PROJECT_IDENTIFIER']).try(:repository).try(:fetch_changesets)" &

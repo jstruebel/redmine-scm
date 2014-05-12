@@ -1,0 +1,108 @@
+#!/bin/bash -ex
+install()
+{
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get -y \
+        -o DPkg::Options::=--force-confdef \
+        -o DPkg::Options::=--force-confold \
+        install $@
+}
+
+DB_PASS=turnkey
+DB_USER=redmine_apache
+DB_NAME=redmine_production
+
+# install required packages
+install libapache2-mod-perl2 libapache-dbi-perl libdevel-symdump-perl libencode-locale-perl libfile-listing-perl libhtml-parser-perl libhtml-tagset-perl libhtml-tree-perl libhttp-cookies-perl libhttp-date-perl libhttp-message-perl libhttp-negotiate-perl libio-socket-ssl-perl liblwp-mediatypes-perl liblwp-protocol-https-perl libnet-http-perl libperl5.14 liburi-perl libwww-perl libwww-robotrules-perl libauthen-simple-ldap-perl libauthen-simple-perl libclass-accessor-perl libclass-data-inheritable-perl libconvert-asn1-perl libcrypt-passwdmd5-perl libmath-bigint-perl libmodule-implementation-perl libmodule-runtime-perl libnet-ldap-perl libparams-classify-perl libparams-validate-perl libsub-name-perl libtry-tiny-perl libapache2-svn libapache2-mod-wsgi libpython2.6 libpython2.7 python2.6 python2.6-minimal
+
+# download scm-creator
+INSTALL_DIR=/var/www/redmine/plugins
+wget -O /usr/local/src/redmine_scm-0.4.3.tar.bz2 http://projects.andriylesyuk.com/attachments/download/486/redmine_scm-0.4.3.tar.bz2
+
+tar -xjf /usr/local/src/redmine_scm-0.4.3.tar.bz2 -C $INSTALL_DIR
+
+# ensure repo directories are writeable by www-data
+chown -R www-data:www-data /srv/repos
+
+# start mysql server
+/etc/init.d/mysql start
+
+# install scm-creator
+/usr/local/bin/rake -f /var/www/redmine/Rakefile RAILS_ENV=production redmine:plugins:migrate
+
+# create mysql user
+mysql --defaults-extra-file=/etc/mysql/debian.cnf --batch --execute "grant select on $DB_NAME.* to $DB_USER@localhost identified by '$DB_PASS'; flush privileges;"
+
+# insert password in apache config files
+CONF=/etc/apache2/conf/svn-redmine.conf
+sed -i "s|RedmineDSN.*|RedmineDSN \"DBI:mysql:database=${DB_NAME};host=localhost:3306\"|" $CONF
+sed -i "s|RedmineDbUser.*|RedmineDbUser \"${DB_USER}\"|" $CONF
+sed -i "s|RedmineDbPass.*|RedmineDbPass \"${DB_PASS}\"|" $CONF
+
+CONF=/etc/apache2/conf/git-redmine.conf
+sed -i "s|RedmineDSN.*|RedmineDSN \"DBI:mysql:database=${DB_NAME};host=localhost:3306\"|" $CONF
+sed -i "s|RedmineDbUser.*|RedmineDbUser \"${DB_USER}\"|" $CONF
+sed -i "s|RedmineDbPass.*|RedmineDbPass \"${DB_PASS}\"|" $CONF
+
+CONF=/etc/apache2/conf/hg-redmine.conf
+sed -i "s|RedmineDSN.*|RedmineDSN \"DBI:mysql:database=${DB_NAME};host=localhost:3306\"|" $CONF
+sed -i "s|RedmineDbUser.*|RedmineDbUser \"${DB_USER}\"|" $CONF
+sed -i "s|RedmineDbPass.*|RedmineDbPass \"${DB_PASS}\"|" $CONF
+
+CONF=/etc/apache2/conf/bzr-redmine.conf
+sed -i "s|RedmineDSN.*|RedmineDSN \"DBI:mysql:database=${DB_NAME};host=localhost:3306\"|" $CONF
+sed -i "s|RedmineDbUser.*|RedmineDbUser \"${DB_USER}\"|" $CONF
+sed -i "s|RedmineDbPass.*|RedmineDbPass \"${DB_PASS}\"|" $CONF
+
+# setup redmine authentication
+mkdir -p /usr/lib/perl5/Apache/Authn
+ln -s /var/www/redmine/extra/svn/Redmine.pm /usr/lib/perl5/Apache/Authn/Redmine.pm
+
+# setup redmine virtualhost
+CONF=/etc/apache2/conf/redmine.conf
+sed -i "s|# Rewrite to check for Rails cached page|# Rewrite to check for Rails cached page\nRewriteCond %{REQUEST_URI} !^/svn/\nRewriteCond %{REQUEST_URI} !^/git/\nRewriteCond %{REQUEST_URI} !^/static/\nRewriteCond %{REQUEST_URI} !^/hg/\nRewriteCond %{REQUEST_URI} !^/bzr/|" $CONF
+sed -i "s|</Directory>|</Directory>\n\nInclude /etc/apache2/conf/auth-redmine.conf\n\nInclude /etc/apache2/conf/svn-redmine.conf\n\nInclude /etc/apache2/conf/git-redmine.conf\n\nInclude /etc/apache2/conf/hg-redmine.conf\n\nInclude /etc/apache2/conf/bzr-redmine.conf|" $CONF
+
+# disable services
+update-rc.d svnserve disable
+update-rc.d git-daemon disable
+a2dissite mercurial
+update-rc.d bzr disable
+
+# setup hgweb
+CONF=/etc/mercurial/hgweb.config
+sed -i "s|\[web\]|[web]\nbaseurl = hg\nallow_push = *\npush_ssl = false\n|" $CONF
+
+# remove link to public repos in git subdir
+rm /srv/repos/git/public
+
+# convert git helloworld repo to a bare repository
+rm /srv/repos/git/helloworld/*
+mv /srv/repos/git/helloworld/.git/* /srv/repos/git/helloworld
+rm -R /srv/repos/git/helloworld/.git
+
+# change sample helloworld repos to work with new apache access
+update_repos(){
+mysql --defaults-extra-file=/etc/mysql/debian.cnf <<EOF
+USE redmine_production;
+UPDATE repositories SET url='$2',root_url='$2' WHERE identifier='$1-helloworld';
+EOF
+
+mv /srv/repos/$1/helloworld /srv/repos/$1/$1-helloworld
+}
+
+update_repos git /srv/repos/git/git-helloworld
+update_repos hg  /srv/repos/hg/hg-helloworld
+update_repos bzr /srv/repos/bzr/bzr-helloworld
+update_repos svn file:///srv/repos/svn/svn-helloworld
+
+# stop services started during install
+/etc/init.d/mysql stop
+/etc/init.d/apache2 stop
+
+# replace service definitions for confconsole
+CONF=/etc/confconsole/services.txt
+sed -i "s|SVN:.*|SVN:        http://\$ipaddr/svn\n            https://\$ipaddr/svn|" $CONF
+sed -i "s|GIT:.*|GIT:        http://\$ipaddr/git\n            https://\$ipaddr/git|" $CONF
+sed -i "s|BZR:.*|BZR:        http://\$ipaddr/bzr\n            https://\$ipaddr/bzr|" $CONF
+sed -i "s|Mercurial:.*|Mercurial:  http://\$ipaddr/hg\n            https://\$ipaddr/hg|" $CONF
