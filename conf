@@ -12,6 +12,9 @@ DB_PASS=turnkey
 DB_USER=redmine_apache
 DB_NAME=redmine_production
 
+APACHE_RUNNING=$(/etc/init.d/apache2 status > /dev/null; echo $?)
+MYSQL_RUNNING=$(/etc/init.d/mysql status > /dev/null; echo $?)
+
 # install required packages
 install libapache2-mod-perl2 libapache-dbi-perl libdevel-symdump-perl libencode-locale-perl libfile-listing-perl libhtml-parser-perl libhtml-tagset-perl libhtml-tree-perl libhttp-cookies-perl libhttp-date-perl libhttp-message-perl libhttp-negotiate-perl libio-socket-ssl-perl liblwp-mediatypes-perl liblwp-protocol-https-perl libnet-http-perl libperl5.14 liburi-perl libwww-perl libwww-robotrules-perl libauthen-simple-ldap-perl libauthen-simple-perl libclass-accessor-perl libclass-data-inheritable-perl libconvert-asn1-perl libcrypt-passwdmd5-perl libmath-bigint-perl libmodule-implementation-perl libmodule-runtime-perl libnet-ldap-perl libparams-classify-perl libparams-validate-perl libsub-name-perl libtry-tiny-perl libapache2-svn libapache2-mod-wsgi libpython2.6 libpython2.7 python2.6 python2.6-minimal
 
@@ -25,7 +28,9 @@ tar -xjf /usr/local/src/redmine_scm-0.4.3.tar.bz2 -C $INSTALL_DIR
 chown -R www-data:www-data /srv/repos
 
 # start mysql server
-/etc/init.d/mysql start
+if [ "$MYSQL_RUNNING" != "0" ]; then
+    /etc/init.d/mysql start
+fi
 
 # install scm-creator
 /usr/local/bin/rake -f /var/www/redmine/Rakefile RAILS_ENV=production redmine:plugins:migrate
@@ -97,8 +102,14 @@ update_repos bzr /srv/repos/bzr/bzr-helloworld
 update_repos svn file:///srv/repos/svn/svn-helloworld
 
 # stop services started during install
-/etc/init.d/mysql stop
-/etc/init.d/apache2 stop
+if [ "$APACHE_RUNNING" != "0" ]; then
+    /etc/init.d/apache2 stop
+else
+    /etc/init.d/apache2 restart
+fi
+if [ "$MYSQL_RUNNING" != "0" ]; then
+    /etc/init.d/mysql stop
+fi
 
 # replace service definitions for confconsole
 CONF=/etc/confconsole/services.txt
